@@ -176,7 +176,7 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 		},
 		mcnflag.StringFlag{
 			Name:   "google-labels",
-			Usage:  "labels to add onto the created node",
+			Usage:  "labels to add onto the created virtual machine",
 			EnvVar: "GOOGLE_LABELS",
 			Value:  "",
 		},
@@ -503,26 +503,35 @@ func (d *Driver) Remove() error {
 		}
 	}
 
+	// collect all errors and only return them
+	// later. If we fail to destroy one firewall,
+	// we should still attempt to remove the other.
+	var errs []error
 	if len(d.OpenPorts) > 0 {
-		fwRule, err := c.externalFirewallRule()
-		if err != nil {
+		externalFwRule, err := c.externalFirewallRule()
+		if isNotFound(err) {
+			log.Infof("external firewall rule '%s' does not exist, nothing to do", c.externalFirewallRuleName())
+		} else if err != nil {
 			log.Warnf("failed to get external firewall rule '%s' while deleting VM: %v", c.externalFirewallRuleName(), err)
-		}
-		if err := c.CleanUpFirewallRule(fwRule, externalFirewallRuleLabelKey); err != nil {
+			errs = append(errs, err)
+		} else if err = c.CleanUpFirewallRule(externalFwRule, externalFirewallRuleLabelKey); err != nil {
 			log.Errorf("failed remove external firewall rule '%s': %v", c.externalFirewallRuleName(), err)
+			errs = append(errs, err)
 		}
 	}
 
 	if c.internalFirewallRulePrefix != "" {
 		internalFwRule, err := c.internalFirewallRule()
-		if err != nil {
-			log.Warnf("failed to get internal firewall rule '%s' while delete VM: %v", c.internalFirewallRuleName(), err)
-		}
-
-		if err := c.CleanUpFirewallRule(internalFwRule, internalFirewallRuleLabelKey); err != nil {
-			log.Errorf("failed to remove internal firewall rule '%s': %v", c.internalFirewallRuleName(), err)
+		if isNotFound(err) {
+			log.Infof("internal firewall rule '%s' does not exist, nothing to do", c.internalFirewallRuleName())
+		} else if err != nil {
+			log.Warnf("failed to get internal firewall rule '%s' while deleting VM: %v", c.internalFirewallRuleName(), err)
+			errs = append(errs, err)
+		} else if err = c.CleanUpFirewallRule(internalFwRule, internalFirewallRuleLabelKey); err != nil {
+			log.Errorf("failed remove internal firewall rule '%s': %v", c.internalFirewallRuleName(), err)
+			errs = append(errs, err)
 		}
 	}
 
-	return nil
+	return errors.Join(errs...)
 }

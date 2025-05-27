@@ -1,8 +1,10 @@
 package google
 
 import (
+	"slices"
 	"testing"
 
+	"github.com/rancher/machine/drivers/driverutil"
 	"github.com/rancher/wrangler/v3/pkg/name"
 	"github.com/stretchr/testify/assert"
 	raw "google.golang.org/api/compute/v1"
@@ -75,32 +77,90 @@ func TestPortsUsed(t *testing.T) {
 	}
 }
 
-func TestMissingOpenedPorts(t *testing.T) {
+func TestUpdatePorts(t *testing.T) {
+	t.Parallel()
+
 	var tests = []struct {
-		description     string
-		allowed         []*raw.FirewallAllowed
-		ports           []string
-		expectedMissing map[string][]string
+		name          string
+		rule          *raw.Firewall
+		incomingPorts []string
+		diffExpected  bool
 	}{
-		{"no port opened", []*raw.FirewallAllowed{}, []string{"2376"}, map[string][]string{"tcp": {"2376"}}},
-		{"docker port opened", []*raw.FirewallAllowed{{IPProtocol: "tcp", Ports: []string{"2376"}}}, []string{"2376"}, map[string][]string{}},
-		{"missing swarm port", []*raw.FirewallAllowed{{IPProtocol: "tcp", Ports: []string{"2376"}}}, []string{"2376", "3376"}, map[string][]string{"tcp": {"3376"}}},
-		{"missing docker port", []*raw.FirewallAllowed{{IPProtocol: "tcp", Ports: []string{"3376"}}}, []string{"2376", "3376"}, map[string][]string{"tcp": {"2376"}}},
-		{"both ports opened", []*raw.FirewallAllowed{{IPProtocol: "tcp", Ports: []string{"2376", "3376"}}}, []string{"2376", "3376"}, map[string][]string{}},
-		{"more ports opened", []*raw.FirewallAllowed{{IPProtocol: "tcp", Ports: []string{"2376", "3376", "22", "1024-2048"}}}, []string{"2376", "3376"}, map[string][]string{}},
-		{"additional missing", []*raw.FirewallAllowed{{IPProtocol: "tcp", Ports: []string{"2376", "2377/tcp"}}}, []string{"2377/udp", "80/tcp", "2376"}, map[string][]string{"tcp": {"80"}, "udp": {"2377"}}},
+		{
+			name: "no change",
+			rule: &raw.Firewall{
+				Allowed: []*raw.FirewallAllowed{
+					{
+						IPProtocol: "tcp",
+						Ports:      []string{"80", "443"},
+					},
+				},
+			},
+			incomingPorts: []string{"443", "80"},
+			diffExpected:  false,
+		},
+		{
+			name: "add ports",
+			rule: &raw.Firewall{
+				Allowed: []*raw.FirewallAllowed{
+					{
+						IPProtocol: "tcp",
+						Ports:      []string{"80"},
+					},
+				},
+			},
+			incomingPorts: []string{"80/tcp", "443/tcp", "123/udp"},
+			diffExpected:  true,
+		},
+		{
+			name: "remove ports",
+			rule: &raw.Firewall{
+				Allowed: []*raw.FirewallAllowed{
+					{
+						IPProtocol: "tcp",
+						Ports:      []string{"80", "443"},
+					},
+					{
+						IPProtocol: "udp",
+						Ports:      []string{"123"},
+					},
+				},
+			},
+			incomingPorts: []string{"80/tcp"},
+			diffExpected:  true,
+		},
 	}
 
-	for _, test := range tests {
-		firewall := &raw.Firewall{Allowed: test.allowed}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			diff := updatePorts(tt.rule, tt.incomingPorts)
+			if diff && !tt.diffExpected {
+				t.Logf("expected change to be %t, but got %t", tt.diffExpected, diff)
+				t.Fail()
+			}
 
-		missingPorts := missingOpenedPorts(firewall, test.ports)
-
-		assert.Equal(t, test.expectedMissing, missingPorts, test.description)
+			for _, p := range tt.incomingPorts {
+				port, proto := driverutil.SplitPortProto(p)
+				switch proto {
+				case "udp":
+					if !slices.Contains(tt.rule.Allowed[1].Ports, port) {
+						t.Logf("expected port %s to be in allowed list", port)
+						t.Fail()
+					}
+				default:
+					if !slices.Contains(tt.rule.Allowed[0].Ports, port) {
+						t.Logf("expected port %s to be in allowed list", port)
+						t.Fail()
+					}
+				}
+			}
+		})
 	}
 }
 
 func TestParseLabels(t *testing.T) {
+	t.Parallel()
 	var tests = []struct {
 		name     string
 		labels   string
@@ -135,8 +195,8 @@ func TestParseLabels(t *testing.T) {
 		},
 	}
 
-	t.Parallel()
 	for _, tt := range tests {
+		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.expected, parseLabels(tt.labels))
 		})

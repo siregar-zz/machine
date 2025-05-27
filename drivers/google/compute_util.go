@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -47,7 +48,7 @@ type ComputeUtil struct {
 
 const (
 	apiURL                       = "https://www.googleapis.com/compute/v1/projects/"
-	externalFirewallRuleSuffix   = "external-rancher-node"
+	externalFirewallRuleSuffix   = "external-rancher-nodes"
 	internalFirewallRuleSuffix   = "internal-rancher-nodes"
 	externalFirewallRuleLabelKey = "rancher-external-fw-rule"
 	internalFirewallRuleLabelKey = "rancher-internal-fw-rule"
@@ -177,26 +178,63 @@ func (c *ComputeUtil) internalFirewallRuleName() string {
 	return name.SafeConcatName(c.internalFirewallRulePrefix, internalFirewallRuleSuffix)
 }
 
-func missingOpenedPorts(rule *raw.Firewall, ports []string) map[string][]string {
-	missing := map[string][]string{}
-	opened := map[string]bool{}
-
-	for _, allowed := range rule.Allowed {
-		for _, allowedPort := range allowed.Ports {
-			opened[allowedPort+"/"+allowed.IPProtocol] = true
-		}
-	}
-
+// updatePorts compares the provided firewall rule against the list of provided ports
+// and returns a boolean indicating if the provided rule has been updated to only include
+// the provided ports.
+func updatePorts(rule *raw.Firewall, ports []string) bool {
+	requestedPorts := map[string][]string{}
 	for _, p := range ports {
 		port, proto := driverutil.SplitPortProto(p)
-		if !opened[port+"/"+proto] {
-			missing[proto] = append(missing[proto], port)
+		requestedPorts[proto] = append(requestedPorts[proto], port)
+	}
+
+	opened := map[string][]string{}
+	for _, allowed := range rule.Allowed {
+		for _, allowedPort := range allowed.Ports {
+			opened[allowed.IPProtocol] = append(opened[allowed.IPProtocol], allowedPort)
 		}
 	}
-	if len(missing) > 0 {
-		log.Warnf("found missing ports for firewall rule '%s': %v", rule.Name, missing)
+
+	// if there is a mismatch between the currently opened
+	// ports and existing ports, recreate the rule with only
+	// the requested ports.
+	recreate := false
+
+	for proto, ports := range opened {
+		for _, p := range ports {
+			// a port needs to be closed
+			if !slices.Contains(requestedPorts[proto], p) {
+				recreate = true
+				break
+			}
+		}
 	}
-	return missing
+
+	for proto, ports := range requestedPorts {
+		for _, p := range ports {
+			// a port needs to be opened
+			if !slices.Contains(opened[proto], p) {
+				recreate = true
+				break
+			}
+		}
+	}
+
+	if !recreate {
+		return false
+	}
+
+	rule.Allowed = []*raw.FirewallAllowed{}
+	for proto, ports := range requestedPorts {
+		rule.Allowed = append(rule.Allowed, &raw.FirewallAllowed{
+			IPProtocol: proto,
+			// note that Ports can only include numbers, and not
+			// number protocol pairs.
+			Ports: ports,
+		})
+	}
+
+	return true
 }
 
 func (c *ComputeUtil) portsUsed() ([]string, error) {
@@ -233,8 +271,6 @@ func (c *ComputeUtil) openInternalFirewallPorts(d *Driver) error {
 		"6443",
 		"2379",
 		"2380",
-		"4789",
-		"2376",
 		"9345",
 		"9796",
 		"8472/udp",
@@ -256,17 +292,20 @@ func (c *ComputeUtil) openInternalFirewallPorts(d *Driver) error {
 		}
 	}
 
-	missingPorts := missingOpenedPorts(rule, expectedPorts)
-	if len(missingPorts) == 0 {
-		log.Debugf("Do not need to update internal firewall rule '%s' as all ports are configured", rule.Name)
-		return nil
+	// ensure an existing firewall rule properly points to the specified network
+	networkChanged := false
+	desiredNet := c.globalURL + "/networks/" + d.Network
+	if !create {
+		if desiredNet != rule.Network {
+			networkChanged = true
+			rule.Network = desiredNet
+		}
 	}
 
-	for proto, ports := range missingPorts {
-		rule.Allowed = append(rule.Allowed, &raw.FirewallAllowed{
-			IPProtocol: proto,
-			Ports:      ports,
-		})
+	// ensure the rule is specifying only the expected ports
+	if !updatePorts(rule, expectedPorts) && !networkChanged {
+		log.Debugf("Do not need to update internal firewall rule '%s' as all ports are configured", rule.Name)
+		return nil
 	}
 
 	var err error
@@ -298,7 +337,6 @@ func (c *ComputeUtil) openPublicFirewallPorts(d *Driver) error {
 			Description:  "rancher-machine managed external firewall rule",
 			Allowed:      []*raw.FirewallAllowed{},
 			SourceRanges: []string{"0.0.0.0/0"},
-			SourceTags:   []string{c.externalFirewallRuleName()},
 			TargetTags:   []string{c.externalFirewallRuleName()},
 			Network:      c.globalURL + "/networks/" + d.Network,
 		}
@@ -309,16 +347,20 @@ func (c *ComputeUtil) openPublicFirewallPorts(d *Driver) error {
 		return err
 	}
 
-	missingPorts := missingOpenedPorts(rule, portsUsed)
-	if len(missingPorts) == 0 {
-		log.Infof("Do not need to update external firewall rule '%s' as all ports are configured", rule.Name)
-		return nil
+	// ensure an existing firewall rule properly points to the specified network
+	networkChanged := false
+	desiredNet := c.globalURL + "/networks/" + d.Network
+	if !create {
+		if desiredNet != rule.Network {
+			networkChanged = true
+			rule.Network = desiredNet
+		}
 	}
-	for proto, ports := range missingPorts {
-		rule.Allowed = append(rule.Allowed, &raw.FirewallAllowed{
-			IPProtocol: proto,
-			Ports:      ports,
-		})
+
+	// ensure the rule is specifying only the requested ports
+	if !updatePorts(rule, portsUsed) && !networkChanged {
+		log.Debugf("Do not need to update internal firewall rule '%s' as all ports are configured", rule.Name)
+		return nil
 	}
 
 	var op *raw.Operation
@@ -361,6 +403,9 @@ func (c *ComputeUtil) CleanUpFirewallRule(rule *raw.Firewall, labelKey string) e
 	log.Infof("Removing rancher-machine managed firewall rule '%s' from project as no instances are using it", rule.Name)
 	op, err := c.service.Firewalls.Delete(c.project, rule.Name).Do()
 	if err != nil {
+		if isNotFound(err) {
+			return nil
+		}
 		return fmt.Errorf("failed to remove rancher-machine managed firewall rule '%s': %w", rule.Name, err)
 	}
 
