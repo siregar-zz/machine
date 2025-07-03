@@ -175,9 +175,9 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 			Value:  "",
 		},
 		mcnflag.StringFlag{
-			Name:   "google-labels",
+			Name:   "google-vm-labels",
 			Usage:  "labels to add onto the created virtual machine",
-			EnvVar: "GOOGLE_LABELS",
+			EnvVar: "GOOGLE_VM_LABELS",
 			Value:  "",
 		},
 	}
@@ -274,7 +274,7 @@ func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 		d.OpenPorts = flags.StringSlice("google-open-port")
 		d.ExternalFirewallRulePrefix = flags.String("google-external-firewall-rule-prefix")
 		d.InternalFirewallRulePrefix = flags.String("google-internal-firewall-rule-prefix")
-		d.Labels = flags.String("google-labels")
+		d.Labels = flags.String("google-vm-labels")
 	}
 	d.SSHUser = flags.String("google-username")
 	d.SSHPort = 22
