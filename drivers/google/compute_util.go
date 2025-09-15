@@ -318,9 +318,14 @@ func (c *ComputeUtil) openInternalFirewallPorts(d *Driver) error {
 		log.Infof("Updating existing internal firewall rule '%s'", rule.Name)
 		op, err = c.service.Firewalls.Update(c.project, c.internalFirewallRuleName(), rule).Do()
 	}
-
 	if err != nil {
-		return err
+		var apiErr *googleapi.Error
+		ok := errors.As(err, &apiErr)
+		if !ok || apiErr.Code != http.StatusConflict {
+			return fmt.Errorf("failed to create internal firewall rule: %w", err)
+		}
+		log.Warnf("Conflict encountered when creating internal firewall rule, %s already exists, will use existing rule", rule.Name)
+		return nil
 	}
 
 	return c.waitForGlobalOp(op.Name)
@@ -372,7 +377,13 @@ func (c *ComputeUtil) openPublicFirewallPorts(d *Driver) error {
 		op, err = c.service.Firewalls.Update(c.project, c.externalFirewallRuleName(), rule).Do()
 	}
 	if err != nil {
-		return err
+		var apiErr *googleapi.Error
+		ok := errors.As(err, &apiErr)
+		if !ok || apiErr.Code != http.StatusConflict {
+			return fmt.Errorf("failed to create external firewall rule: %w", err)
+		}
+		log.Warnf("Conflict when creating external firewall rule, %s already exists, will use existing rule", rule.Name)
+		return nil
 	}
 
 	return c.waitForGlobalOp(op.Name)
