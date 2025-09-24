@@ -140,16 +140,26 @@ func TestUpdatePorts(t *testing.T) {
 				t.Fail()
 			}
 
+			var udpPorts, tcpPorts []string
+			for _, allowed := range tt.rule.Allowed {
+				if allowed.IPProtocol == "udp" {
+					udpPorts = allowed.Ports
+				}
+				if allowed.IPProtocol == "tcp" {
+					tcpPorts = allowed.Ports
+				}
+			}
+
 			for _, p := range tt.incomingPorts {
 				port, proto := driverutil.SplitPortProto(p)
 				switch proto {
 				case "udp":
-					if !slices.Contains(tt.rule.Allowed[1].Ports, port) {
+					if !slices.Contains(udpPorts, port) {
 						t.Logf("expected port %s to be in allowed list", port)
 						t.Fail()
 					}
 				default:
-					if !slices.Contains(tt.rule.Allowed[0].Ports, port) {
+					if !slices.Contains(tcpPorts, port) {
 						t.Logf("expected port %s to be in allowed list", port)
 						t.Fail()
 					}
