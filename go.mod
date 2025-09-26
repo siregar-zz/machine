@@ -1,4 +1,4 @@
-module github.com/rancher/machine
+module github.com/siregar-zz/machine
 
 go 1.24.0
 
